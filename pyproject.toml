@@ -9,9 +9,9 @@ description = "CLI tool for HP inkjet printer maintenance via the Embedded Web S
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.31.0",
-    "zeroconf>=0.131.0",
-    "rich>=13.7.0",
+    "requests>=2.32.0",
+    "zeroconf>=0.148.0",
+    "rich>=14.0.0",
     "click>=8.1.0",
 ]
 
