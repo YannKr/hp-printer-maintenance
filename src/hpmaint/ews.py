@@ -21,6 +21,8 @@ POSTs to maintenance endpoints require credentials when hasAuth=true.
 from __future__ import annotations
 
 import re
+import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
@@ -141,37 +143,65 @@ class EWSClient:
             log.warning("GET %s — %s", url, e)
             return None
 
-    def _post_xml(self, path: str, body: str) -> requests.Response | None:
+    def _post_xml(
+        self,
+        path: str,
+        body: str,
+        content_type: str = "text/xml; charset=utf-8",
+        retries_on_503: int = 0,
+        retry_delay: float = 60.0,
+    ) -> requests.Response | None:
         url = self._url(path)
         auth = self._auth()
         extra_headers: dict = {
-            "Content-Type": "text/xml; charset=utf-8",
+            "Content-Type": content_type,
             "X-Requested-With": "XMLHttpRequest",
             "Origin": self.base_url,
             "Referer": self.base_url + "/",
         }
         if self._auth_counter:
             extra_headers["X-Auth-Counter"] = str(self._auth_counter)
-        log.debug("POST %s  auth=%s  X-Auth-Counter=%s\n  body: %s",
-                  url, f"{auth.username}:***" if auth else "none",
-                  self._auth_counter or "none", body[:300])
-        try:
-            r = self._session.post(
-                url,
-                data=body.encode("utf-8"),
-                headers=extra_headers,
-                timeout=self.timeout,
-                allow_redirects=True,
-                auth=auth,
-            )
-            log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
-            if r.status_code >= 400:
-                log.warning("POST %s returned HTTP %d\n  body: %s",
-                            url, r.status_code, r.text[:400])
-            return r
-        except requests.RequestException as e:
-            log.warning("POST %s — %s", url, e)
-            return None
+
+        attempts = max(1, retries_on_503 + 1)
+        last_response: requests.Response | None = None
+        for attempt in range(1, attempts + 1):
+            attempt_tag = f" [attempt {attempt}/{attempts}]" if attempts > 1 else ""
+            log.debug("POST %s  auth=%s  X-Auth-Counter=%s%s\n  body: %s",
+                      url, f"{auth.username}:***" if auth else "none",
+                      self._auth_counter or "none", attempt_tag, body[:300])
+            try:
+                r = self._session.post(
+                    url,
+                    data=body.encode("utf-8"),
+                    headers=extra_headers,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    auth=auth,
+                )
+                log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
+                last_response = r
+
+                if r.status_code == 503 and attempt < attempts:
+                    log.info(
+                        "Printer busy (HTTP 503) on %s — retrying in %ds (%d/%d)",
+                        path, int(retry_delay), attempt, retries_on_503,
+                    )
+                    sys.stderr.write(
+                        f"  Printer busy, retrying in {int(retry_delay)}s "
+                        f"({attempt}/{retries_on_503})\n"
+                    )
+                    sys.stderr.flush()
+                    time.sleep(retry_delay)
+                    continue
+
+                if r.status_code >= 400:
+                    log.warning("POST %s returned HTTP %d\n  body: %s",
+                                url, r.status_code, r.text[:400])
+                return r
+            except requests.RequestException as e:
+                log.warning("POST %s — %s", url, e)
+                return None
+        return last_response
 
     # ---------------------------------------------------------------- probe / auth
 
@@ -360,7 +390,10 @@ class EWSClient:
             f'<ipdyn:JobType>{job_type}</ipdyn:JobType>'
             f'</ipdyn:InternalPrintDyn>'
         )
-        r = self._post_xml("/DevMgmt/InternalPrintDyn.xml", body)
+        r = self._post_xml(
+            "/DevMgmt/InternalPrintDyn.xml", body,
+            retries_on_503=3, retry_delay=60.0,
+        )
 
         if r is None:
             return MaintenanceResult(success=False, message="No response from printer")
@@ -398,16 +431,47 @@ class EWSClient:
             result.manual_instructions = _manual_clean(level)
         return result
 
+    def get_calibration_state(self) -> str | None:
+        """GET /Calibration/State and return the current state string, or None."""
+        r = self._get("/Calibration/State")
+        if not r:
+            return None
+        log.debug("/Calibration/State body: %s", r.text[:500])
+        try:
+            root = ET.fromstring(r.content)
+        except ET.ParseError as e:
+            log.warning("Could not parse /Calibration/State: %s", e)
+            return None
+        for elem in root.iter():
+            local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if local in ("CalibrationState", "State"):
+                text = (elem.text or "").strip()
+                if text:
+                    return text
+        return None
+
     def align_printhead(self) -> MaintenanceResult:
         log.info("align_printhead() → POST /Calibration/Session")
+
+        # Diagnostic: the LEDM markingagentcalibration state machine governs
+        # which transitions are legal. Surface the current state on failure.
+        state = self.get_calibration_state()
+        if state:
+            log.info("Current calibration state: %s", state)
+
+        # The endpoint requires Content-Type: text/xml and a schema-valid body.
+        # The valid trigger value is `Printing` — the printer prints an
+        # alignment pattern and reads it back. (`Scanning` selects the
+        # scanner-based variant; `CalibrationRequired` is a printer-set status
+        # that produces 409 because it's not a legal client-initiated state.)
         body = (
             f'<?xml version="1.0" encoding="UTF-8"?>'
-            f'<cal:CalibrationState'
-            f' xmlns:cal="{_NS_CAL}">'
-            f'CalibrationRequired'
-            f'</cal:CalibrationState>'
+            f'<cal:CalibrationState xmlns:cal="{_NS_CAL}">Printing</cal:CalibrationState>'
         )
-        r = self._post_xml("/Calibration/Session", body)
+        r = self._post_xml(
+            "/Calibration/Session", body,
+            retries_on_503=3, retry_delay=60.0,
+        )
 
         if r is None:
             return MaintenanceResult(
@@ -422,6 +486,13 @@ class EWSClient:
             return MaintenanceResult(
                 success=False,
                 message="Access denied (HTTP 403) — EWS password required",
+                manual_instructions=_manual_align(),
+            )
+        if r.status_code == 409:
+            state_info = f" — current state: {state}" if state else ""
+            return MaintenanceResult(
+                success=False,
+                message=f"Printer rejected alignment (HTTP 409){state_info}",
                 manual_instructions=_manual_align(),
             )
         return MaintenanceResult(

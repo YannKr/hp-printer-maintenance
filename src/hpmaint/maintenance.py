@@ -16,6 +16,12 @@ if TYPE_CHECKING:
     from .ews import EWSClient, MaintenanceResult
 
 
+# Minimum gap between consecutive steps. Even when a step finishes "instantly"
+# (HTTP 201), the printer's nginx briefly returns 503 if another POST arrives in
+# the same second — it's still spooling the previous job.
+MIN_STEP_GAP = 10
+
+
 # ------------------------------------------------------------------ sequences
 
 
@@ -141,11 +147,12 @@ def run_sequence(
         if on_step_done:
             on_step_done(sr)
 
-        if step.wait_after > 0 and i < total - 1:
+        if i < total - 1:
+            gap = max(step.wait_after, MIN_STEP_GAP)
             if on_wait:
-                on_wait(step.wait_after)
+                on_wait(gap)
             else:
-                time.sleep(step.wait_after)
+                time.sleep(gap)
 
     return result
 
