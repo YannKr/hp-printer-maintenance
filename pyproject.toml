@@ -20,6 +20,10 @@ dependencies = [
     "zeroconf>=0.149.16",
     "rich>=14.0.0",
     "click>=8.1.0",
+    # Writes config.toml. Without it `configure` falls back to a hand-rolled
+    # writer, which was the default on 3.11+ because setup.sh only installed
+    # tomli_w on older Python.
+    "tomli_w>=1.0.0",
 ]
 
 [project.scripts]

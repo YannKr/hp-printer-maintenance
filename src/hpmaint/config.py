@@ -47,10 +47,20 @@ class Config:
 
     def _load(self) -> None:
         self._data = _deep_merge({}, _DEFAULTS)
-        if self._path.exists():
+        if self._path.exists() and tomllib is not None:
             raw = self._path.read_bytes()
-            if tomllib is not None:
-                self._data = _deep_merge(self._data, tomllib.loads(raw.decode()))
+            try:
+                parsed = tomllib.loads(raw.decode())
+            except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                # Without this, a malformed config makes every later run die
+                # with a bare TOMLDecodeError until the file is deleted by hand.
+                raise SystemExit(
+                    f"Config file is not valid TOML: {self._path}\n"
+                    f"  {exc}\n"
+                    f"Edit it, or delete it and run `hpmaint configure` again:\n"
+                    f"  rm {self._path}"
+                ) from exc
+            self._data = _deep_merge(self._data, parsed)
         # Env-var overrides
         if ip := os.environ.get("HPMAINT_PRINTER_IP"):
             self._data["printer"]["ip"] = ip
@@ -121,9 +131,37 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return result
 
 
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_str(s: str) -> str:
+    """Quote a string as a TOML basic string.
+
+    A password containing " or \\ used to be written raw, producing a file
+    that no TOML parser could read back.
+    """
+    out: list[str] = []
+    for ch in s:
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+
+
 def _toml_value(v: Any) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
-        return f'"{v}"'
+        return _toml_str(v)
     return str(v)

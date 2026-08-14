@@ -48,9 +48,10 @@ echo "Installing dependencies…"
 pip install --quiet --upgrade pip
 pip install --quiet -e .
 
-# tomli_w is needed only for saving config on Python < 3.11
+# tomli_w saves the config on every version and is a declared dependency.
+# tomli is the reader on Python < 3.11 only (3.11+ has stdlib tomllib).
 python -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" \
-    || pip install --quiet tomli tomli_w
+    || pip install --quiet tomli
 
 # ── Make launcher executable ────────────────────────────────────────────────
 chmod +x hpmaint.py
