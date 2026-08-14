@@ -5,13 +5,11 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich import box
 from rich.panel import Panel
 from rich.progress import (
-    BarColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
@@ -30,13 +28,12 @@ from .maintenance import (
     MIN_STEP_GAP,
     SEQUENCES,
     Sequence,
-    SequenceResult,
     Step,
     StepResult,
     run_individual,
     run_sequence,
 )
-from .theme import COW_ART, console, print_info, print_ok, print_step, print_warn
+from .theme import COW_ART, console, print_info, print_ok, print_warn
 
 log = get_logger(__name__)
 

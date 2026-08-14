@@ -7,7 +7,7 @@ import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 from .log import get_logger
@@ -69,7 +69,7 @@ def discover_mdns(timeout: float = 5.0) -> list[PrinterInfo]:
     """Use zeroconf/Bonjour to find printers on the LAN."""
     log.info("Starting mDNS discovery (timeout=%.1fs)", timeout)
     try:
-        from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
+        from zeroconf import ServiceBrowser, Zeroconf
     except ImportError:
         log.warning("zeroconf not available — skipping mDNS discovery")
         return []
@@ -127,7 +127,8 @@ def discover_mdns(timeout: float = 5.0) -> list[PrinterInfo]:
         "_http._tcp.local.",
     ]
     handler = _Handler()
-    browsers = [ServiceBrowser(zc, svc, handler) for svc in services]
+    # Kept alive for the duration of the browse; discarded on zc.close().
+    _browsers = [ServiceBrowser(zc, svc, handler) for svc in services]
     time.sleep(timeout)
     zc.close()
 

@@ -1,7 +1,6 @@
 """Cow-themed Rich styles and ASCII art."""
 
 from rich.console import Console
-from rich.style import Style
 from rich.theme import Theme
 
 # Cow colour palette: white/grey body, black spots, red/pink accents
@@ -52,7 +51,6 @@ COW_SMALL = r"""
 def print_banner(subtitle: str = "HP Envy Photo 7855") -> None:
     from rich.panel import Panel
     from rich.text import Text
-    from rich import box
 
     cow = Text(COW_ART, style="white")
     console.print(cow)

@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test on Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          # tomli reads the config on Python < 3.11 only.
+          python -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" \
+            || python -m pip install tomli
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # The suite mocks every HTTP call. It must never contact a printer.
+        run: pytest -q
+
+      - name: Smoke test the CLI
+        run: |
+          hpmaint --help
+          hpmaint run --list
+          hpmaint op --list
