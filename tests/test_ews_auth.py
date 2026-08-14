@@ -121,6 +121,43 @@ def test_403_with_rejected_password_says_so(client_factory):
     assert "rejected the configured EWS password" in result.message
 
 
+def test_malformed_authchk_json_is_reported_as_such(client_factory):
+    """Not as "the printer rejected your password" — it was never tried."""
+    client, _ = client_factory(
+        routes={
+            "/": FakeResponse(200, "HP"),
+            "/AuthChk": FakeResponse(200, "<html>not json at all</html>"),
+            "/DevMgmt/InternalPrintCap.xml": FakeResponse(404, ""),
+            "/DevMgmt/InternalPrintDyn.xml": FakeResponse(403, "denied"),
+        },
+        password="right",
+    )
+    client.probe()
+    assert client._auth_unknown is True
+
+    result = client.clean_printhead(level=1)
+    assert "unreadable" in result.message
+    assert "rejected" not in result.message
+    assert "never signed in" in result.manual_instructions
+
+
+def test_unreachable_authchk_is_reported_as_such(client_factory):
+    from conftest import timeout_error
+
+    client, _ = client_factory(
+        routes={
+            "/": FakeResponse(200, "HP"),
+            "/AuthChk": timeout_error(),
+            "/DevMgmt/InternalPrintCap.xml": FakeResponse(404, ""),
+            "/DevMgmt/InternalPrintDyn.xml": FakeResponse(403, "denied"),
+        },
+        password="right",
+    )
+    client.probe()
+    result = client.clean_printhead(level=1)
+    assert "unreadable" in result.message
+
+
 def test_403_after_successful_auth_does_not_tell_user_to_configure(client_factory):
     """The misleading message: telling a user to run configure when they did."""
     client = _client_with_state(client_factory, "right", True)

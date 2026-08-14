@@ -160,6 +160,7 @@ class EWSClient:
         self._has_auth: bool | None = None  # None = not yet checked
         self._auth_counter: int = 0         # X-Auth-Counter from /AuthChk
         self._authenticated: bool = False   # Digest handshake succeeded
+        self._auth_unknown: bool = False    # /AuthChk reply could not be read
 
         self._digest_auth: HTTPDigestAuth | None = None
 
@@ -406,7 +407,12 @@ class EWSClient:
             if r.status_code == 200:
                 try:
                     self._has_auth = bool(r.json().get("hasAuth", False))
-                except Exception:
+                except Exception as e:
+                    # Do not silently call this "no password required". A
+                    # later 403 would then blame the user's password for a
+                    # handshake that was never attempted.
+                    log.warning("Could not read the /AuthChk reply: %s", e)
+                    self._auth_unknown = True
                     self._has_auth = False
             elif r.status_code == 401:
                 self._has_auth = True
@@ -425,6 +431,7 @@ class EWSClient:
                     self._authenticated = self._digest_handshake(url_auth)
         except requests.RequestException as e:
             log.warning("AuthChk check failed: %s", e)
+            self._auth_unknown = True
             self._has_auth = bool(self._password)
 
         log.info("Auth required: %s  authenticated: %s",
@@ -437,6 +444,8 @@ class EWSClient:
         """Short reason for an HTTP 403, based on what probe() actually saw."""
         if not self._password:
             return "no EWS password configured"
+        if self._auth_unknown and not self._authenticated:
+            return "the printer's /AuthChk reply was unreadable, so it never signed in"
         if not self._authenticated:
             return "the printer rejected the configured EWS password"
         return "the printer refused the job despite an authenticated session"
@@ -450,6 +459,14 @@ class EWSClient:
                 "Enter the EWS admin password (shown on the printer's\n"
                 "touchscreen under Settings → Printer Info → EWS Password,\n"
                 "or try the printer's WiFi Direct password)."
+            )
+        if self._auth_unknown and not self._authenticated:
+            return (
+                "The printer's reply to /AuthChk could not be read, so the\n"
+                "tool never signed in. Your password is probably fine.\n"
+                "This usually means the printer is half asleep or busy.\n"
+                "Wake it (press a button or open its web page) and retry.\n"
+                "Run with --debug to see the reply it sent."
             )
         if not self._authenticated:
             return (
