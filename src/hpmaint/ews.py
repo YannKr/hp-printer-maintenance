@@ -16,6 +16,11 @@ Confirmed endpoints (reverse-engineered from /framework/Unified.js + manifests):
 
 Auth: HTTP Digest Auth (admin + EWS password). Most GETs work unauthenticated;
 POSTs to maintenance endpoints require credentials when hasAuth=true.
+
+Redirects: every call that can carry the EWS password uses
+allow_redirects=False. The endpoints above are fixed LEDM paths on a LAN
+device — a redirect is never legitimate, and following one would hand the
+Digest credentials to whatever host the redirect names.
 """
 
 from __future__ import annotations
@@ -128,9 +133,9 @@ class EWSClient:
         log.debug("GET %s", url)
         try:
             r = self._session.get(url, timeout=self.timeout,
-                                  allow_redirects=True, auth=self._auth(), **kw)
+                                  allow_redirects=False, auth=self._auth(), **kw)
             log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
-            if r.status_code >= 400:
+            if r.status_code >= 300:
                 log.warning("GET %s returned HTTP %d", url, r.status_code)
                 return None
             return r
@@ -176,7 +181,7 @@ class EWSClient:
                     data=body.encode("utf-8"),
                     headers=extra_headers,
                     timeout=self.timeout,
-                    allow_redirects=True,
+                    allow_redirects=False,
                     auth=auth,
                 )
                 log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
@@ -214,7 +219,7 @@ class EWSClient:
             r2 = self._session.get(
                 url_auth,
                 timeout=self.timeout,
-                allow_redirects=True,
+                allow_redirects=False,
                 auth=self._auth(),
                 headers={"X-Auth-Client-Counter": str(client_counter)},
             )
@@ -249,6 +254,8 @@ class EWSClient:
         log.info("Probing EWS at %s", self.base_url)
 
         # 1. Establish s- session cookie by visiting root (browser does this first).
+        #    This is the one request that still follows redirects: some firmware
+        #    sends / to an index page or to https. It carries no credentials.
         try:
             r0 = self._session.get(self._url("/"), timeout=self.timeout,
                                    allow_redirects=True)
@@ -265,7 +272,7 @@ class EWSClient:
         # 2. Check auth requirement.
         url_auth = self._url("/AuthChk")
         try:
-            r = self._session.get(url_auth, timeout=self.timeout, allow_redirects=True)
+            r = self._session.get(url_auth, timeout=self.timeout, allow_redirects=False)
             log.debug("GET /AuthChk → HTTP %d", r.status_code)
             if r.status_code == 200:
                 try:
