@@ -5,13 +5,11 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich import box
 from rich.panel import Panel
 from rich.progress import (
-    BarColumn,
     Progress,
     SpinnerColumn,
     TextColumn,
@@ -27,20 +25,49 @@ from .ews import EWSClient, InkLevel, MaintenanceResult
 from .log import get_logger, log_path, setup as log_setup
 from .maintenance import (
     INDIVIDUAL_OPS,
+    MIN_STEP_GAP,
     SEQUENCES,
     Sequence,
-    SequenceResult,
     Step,
     StepResult,
     run_individual,
     run_sequence,
 )
-from .theme import COW_ART, console, print_info, print_ok, print_step, print_warn
+from .theme import COW_ART, console, print_info, print_ok, print_warn
 
 log = get_logger(__name__)
 
 
 # ────────────────────────────────────────────────────── helpers
+
+# Options whose value is a credential and must never reach the log file.
+_SECRET_OPTS = ("--password",)
+
+
+def _redact_args(argv: list[str]) -> list[str]:
+    """Return argv with credential values replaced by ***.
+
+    Handles both `--password secret` and `--password=secret`.
+    """
+    safe: list[str] = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            safe.append("***")
+            hide_next = False
+            continue
+        for opt in _SECRET_OPTS:
+            if arg == opt:
+                safe.append(arg)
+                hide_next = True
+                break
+            if arg.startswith(opt + "="):
+                safe.append(f"{opt}=***")
+                break
+        else:
+            safe.append(arg)
+    return safe
+
 
 def _ink_bar(pct: int | None, width: int = 12) -> str:
     """Return a simple ASCII bar for ink level."""
@@ -153,6 +180,26 @@ def _discover_or_exit(cfg: Config) -> tuple[PrinterInfo, EWSClient]:
     return info, client
 
 
+def _wait_between_runs(secs: int) -> None:
+    """Pause between repeats.
+
+    MIN_STEP_GAP protects the printer inside one sequence, but a repeat used
+    to fire the next POST immediately after the previous one finished, which
+    is exactly what makes nginx answer 503 and costs 60s of backoff.
+    """
+    with Progress(
+        SpinnerColumn(style="grey50"),
+        TextColumn(f"[moo.dim]Waiting {secs}s before the next run…[/]"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=console,
+    ) as prog:
+        task = prog.add_task("wait", total=secs)
+        for _ in range(secs):
+            time.sleep(1)
+            prog.advance(task, 1)
+
+
 def _run_sequence_interactive(
     client: EWSClient, seq: Sequence, repeat: int = 1
 ) -> None:
@@ -188,6 +235,10 @@ def _run_sequence_interactive(
             on_wait=on_wait,
         )
 
+        if run_num < repeat:
+            last_wait = seq.steps[-1].wait_after if seq.steps else 0
+            _wait_between_runs(max(last_wait, MIN_STEP_GAP))
+
 
 # ────────────────────────────────────────────────────── CLI
 
@@ -215,7 +266,7 @@ def main(
     # Initialise logging first so every subsequent call is captured
     lp = log_setup(debug=debug, log_file=Path(log_file) if log_file else None)
     log.info("=" * 60)
-    log.info("hpmaint started  args=%s", sys.argv[1:])
+    log.info("hpmaint started  args=%s", _redact_args(sys.argv[1:]))
 
     cfg = Config(path=None if config_path is None else Path(config_path))
     if ip:
@@ -328,6 +379,8 @@ def _interactive_menu(cfg: Config, show_log_path: bool = False) -> None:
                 if op["key"] == "ink":
                     levels = client.get_ink_levels()
                     _show_ink_table(levels)
+                elif r < repeat - 1:
+                    _wait_between_runs(MIN_STEP_GAP)
 
         elif idx == n_configure:
             _configure_menu(cfg)
@@ -411,6 +464,8 @@ def op(ctx: click.Context, operation: str, repeat: int, list_ops: bool) -> None:
         _show_result(result)
         if operation == "ink":
             _show_ink_table(client.get_ink_levels())
+        elif i < repeat - 1:
+            _wait_between_runs(MIN_STEP_GAP)
 
 
 @main.command()

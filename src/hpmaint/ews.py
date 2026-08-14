@@ -16,6 +16,15 @@ Confirmed endpoints (reverse-engineered from /framework/Unified.js + manifests):
 
 Auth: HTTP Digest Auth (admin + EWS password). Most GETs work unauthenticated;
 POSTs to maintenance endpoints require credentials when hasAuth=true.
+
+Redirects: requests never follow redirects automatically, because following
+one would hand the Digest credentials to whatever host the redirect names.
+Exactly one redirect is honoured, by `_https_upgrade()`: http → https on the
+same host, same port semantics, same path and query. Some firmware sends the
+whole EWS to https, and that is the only redirect a printer has a reason to
+send. Everything else is refused and reported.
+
+TLS on the upgraded connection is NOT verified — see _VERIFY_UPGRADE.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 try:
     import requests
@@ -54,6 +64,56 @@ CONFIG_PAGE = "configurationPage"
 DIAG_PAGE   = "diagnosticsPage"
 
 _TIMEOUT = 12
+
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# TLS verification on the https:// connection we upgrade to.
+#
+# This is False on purpose, and it is the only place in the tool that skips
+# verification. Every printer in scope ships a self-signed certificate for a
+# hostname that is not its IP address, so verification can never succeed and
+# `verify=True` would leave HTTPS-only firmware permanently unreachable.
+#
+# What this does and does not buy:
+#  - The baseline for this tool is plain http:// on port 80. Credentials
+#    already cross the LAN in the clear on that path. An unverified TLS
+#    connection is strictly better than the cleartext it replaces.
+#  - The target is not attacker-chosen. _https_upgrade() only accepts a
+#    redirect to the SAME host and the SAME path, changing nothing but the
+#    scheme, so a redirect can never move the request or its credentials to
+#    another host, verified or not.
+#  - It does NOT defend against an active machine-in-the-middle on the LAN.
+#    Such an attacker can already read the plaintext HTTP this replaces.
+_VERIFY_UPGRADE = False
+
+
+def _https_upgrade(url: str, location: str) -> str | None:
+    """Return the URL to retry when `location` is an HTTPS upgrade of `url`.
+
+    Returns None — meaning "refuse this redirect" — for anything else: a
+    different host, a different path or query, a downgrade back to http, or a
+    port that is not the https default.
+    """
+    if not location:
+        return None
+    src = urlsplit(url)
+    dst = urlsplit(urljoin(url, location))
+    if src.scheme != "http" or dst.scheme != "https":
+        return None
+    if dst.username is not None or dst.password is not None:
+        return None
+    if (dst.hostname or "").lower() != (src.hostname or "").lower():
+        return None
+    if (dst.path or "/") != (src.path or "/") or dst.query != src.query:
+        return None
+    if dst.port not in (None, 443):
+        return None
+    return urlunsplit(dst)
+
+
+def _origin_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 # ------------------------------------------------------------------ data types
@@ -99,6 +159,8 @@ class EWSClient:
         self._password = password
         self._has_auth: bool | None = None  # None = not yet checked
         self._auth_counter: int = 0         # X-Auth-Counter from /AuthChk
+        self._authenticated: bool = False   # Digest handshake succeeded
+        self._auth_unknown: bool = False    # /AuthChk reply could not be read
 
         self._digest_auth: HTTPDigestAuth | None = None
 
@@ -122,14 +184,36 @@ class EWSClient:
             return self._digest_auth
         return None
 
+    def _session_get(self, url: str, **kw: Any) -> requests.Response:
+        """GET one URL, honouring only a same-host HTTPS upgrade redirect.
+
+        Any other 3xx is handed back to the caller unfollowed, so it is
+        reported as the failure it is instead of leaking credentials.
+        """
+        r = self._session.get(url, timeout=self.timeout,
+                              allow_redirects=False, **kw)
+        if r.status_code not in _REDIRECT_CODES:
+            return r
+
+        location = r.headers.get("Location", "")
+        target = _https_upgrade(url, location)
+        if target is None:
+            log.warning("Refusing redirect %s → %r: not a same-host HTTPS upgrade",
+                        url, location)
+            return r
+
+        log.info("Upgrading to HTTPS: %s → %s", url, target)
+        return self._session.get(target, timeout=self.timeout,
+                                 allow_redirects=False,
+                                 verify=_VERIFY_UPGRADE, **kw)
+
     def _get(self, path: str, **kw: Any) -> requests.Response | None:
         url = self._url(path)
         log.debug("GET %s", url)
         try:
-            r = self._session.get(url, timeout=self.timeout,
-                                  allow_redirects=True, auth=self._auth(), **kw)
+            r = self._session_get(url, auth=self._auth(), **kw)
             log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
-            if r.status_code >= 400:
+            if r.status_code >= 300:
                 log.warning("GET %s returned HTTP %d", url, r.status_code)
                 return None
             return r
@@ -143,6 +227,39 @@ class EWSClient:
             log.warning("GET %s — %s", url, e)
             return None
 
+    def _post_https_upgrade(
+        self,
+        url: str,
+        response: requests.Response,
+        body: str,
+        headers: dict,
+    ) -> requests.Response:
+        """Repeat a POST over https when the redirect is a same-host upgrade.
+
+        Returns the original response unchanged when the redirect is refused.
+        """
+        location = response.headers.get("Location", "")
+        target = _https_upgrade(url, location)
+        if target is None:
+            log.warning("Refusing redirect %s → %r: not a same-host HTTPS upgrade",
+                        url, location)
+            return response
+
+        # nginx checks Origin/Referer as CSRF protection, so they have to name
+        # the scheme we are actually posting to.
+        origin = _origin_of(target)
+        upgraded_headers = dict(headers, Origin=origin, Referer=origin + "/")
+        log.info("Upgrading to HTTPS: %s → %s", url, target)
+        return self._session.post(
+            target,
+            data=body.encode("utf-8"),
+            headers=upgraded_headers,
+            timeout=self.timeout,
+            allow_redirects=False,
+            auth=self._auth(),
+            verify=_VERIFY_UPGRADE,
+        )
+
     def _post_xml(
         self,
         path: str,
@@ -151,6 +268,7 @@ class EWSClient:
         retries_on_503: int = 0,
         retry_delay: float = 60.0,
     ) -> requests.Response | None:
+        # retries_on_503 also covers connection errors and timeouts.
         url = self._url(path)
         auth = self._auth()
         extra_headers: dict = {
@@ -175,9 +293,11 @@ class EWSClient:
                     data=body.encode("utf-8"),
                     headers=extra_headers,
                     timeout=self.timeout,
-                    allow_redirects=True,
+                    allow_redirects=False,
                     auth=auth,
                 )
+                if r.status_code in _REDIRECT_CODES:
+                    r = self._post_https_upgrade(url, r, body, extra_headers)
                 log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
                 last_response = r
 
@@ -198,6 +318,24 @@ class EWSClient:
                     log.warning("POST %s returned HTTP %d\n  body: %s",
                                 url, r.status_code, r.text[:400])
                 return r
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # More likely than a 503: the printer stops answering while it
+                # spools a purge. Retry on the same schedule as a 503.
+                if attempt < attempts:
+                    log.info(
+                        "POST %s failed (%s) — retrying in %ds (%d/%d)",
+                        path, type(e).__name__, int(retry_delay),
+                        attempt, retries_on_503,
+                    )
+                    sys.stderr.write(
+                        f"  Printer did not answer, retrying in {int(retry_delay)}s "
+                        f"({attempt}/{retries_on_503})\n"
+                    )
+                    sys.stderr.flush()
+                    time.sleep(retry_delay)
+                    continue
+                log.warning("POST %s — %s (no attempts left)", url, e)
+                return None
             except requests.RequestException as e:
                 log.warning("POST %s — %s", url, e)
                 return None
@@ -205,19 +343,49 @@ class EWSClient:
 
     # ---------------------------------------------------------------- probe / auth
 
+    def _digest_handshake(self, url_auth: str) -> bool:
+        """Authenticate the session with Digest + X-Auth-Client-Counter (SPA nonce)."""
+        import random
+        client_counter = random.randint(1, 999999)
+        try:
+            r2 = self._session_get(
+                url_auth,
+                auth=self._auth(),
+                headers={"X-Auth-Client-Counter": str(client_counter)},
+            )
+        except requests.RequestException as e:
+            log.warning("Digest Auth request failed: %s", e)
+            return False
+
+        log.debug("GET /AuthChk (Digest) → HTTP %d", r2.status_code)
+        if r2.status_code == 200:
+            counter = r2.headers.get("X-Auth-Counter", "")
+            if counter:
+                try:
+                    self._auth_counter = int(counter)
+                except ValueError:
+                    pass
+            log.info("Authenticated (X-Auth-Counter=%s)", self._auth_counter or "none")
+            return True
+
+        log.warning("Digest Auth failed (HTTP %d) — check EWS password", r2.status_code)
+        return False
+
     def probe(self) -> bool:
         """Return True if the EWS is reachable. Also authenticates if needed.
 
         Auth flow mirrors the browser SPA:
           1. GET /  → establishes s- session cookie
-          2. GET /AuthChk  → check if password is set (401 = yes)
+          2. GET /AuthChk  → check if password is set. Firmware answers either
+             401, or 200 with {"hasAuth": true} — both mean a password is set.
           3. GET /AuthChk with Digest + X-Auth-Client-Counter → authenticate session
         POST requests then need X-Requested-With/Origin/Referer (nginx CSRF check).
         """
-        import random
         log.info("Probing EWS at %s", self.base_url)
 
         # 1. Establish s- session cookie by visiting root (browser does this first).
+        #    This is the one request that still follows redirects: some firmware
+        #    sends / to an index page or to https. It carries no credentials.
         try:
             r0 = self._session.get(self._url("/"), timeout=self.timeout,
                                    allow_redirects=True)
@@ -234,51 +402,85 @@ class EWSClient:
         # 2. Check auth requirement.
         url_auth = self._url("/AuthChk")
         try:
-            r = self._session.get(url_auth, timeout=self.timeout, allow_redirects=True)
+            r = self._session_get(url_auth)
             log.debug("GET /AuthChk → HTTP %d", r.status_code)
             if r.status_code == 200:
                 try:
                     self._has_auth = bool(r.json().get("hasAuth", False))
-                except Exception:
+                except Exception as e:
+                    # Do not silently call this "no password required". A
+                    # later 403 would then blame the user's password for a
+                    # handshake that was never attempted.
+                    log.warning("Could not read the /AuthChk reply: %s", e)
+                    self._auth_unknown = True
                     self._has_auth = False
             elif r.status_code == 401:
                 self._has_auth = True
+            else:
+                self._has_auth = False
+
+            # 3. A password is set — authenticate. Reached from both the 401
+            #    branch and the 200 {"hasAuth": true} branch.
+            if self._has_auth:
                 if not self._password:
                     log.warning(
                         "EWS requires a password but none is configured. "
                         "Run: ./hpmaint.py configure"
                     )
                 else:
-                    # 3. Authenticate: Digest Auth + X-Auth-Client-Counter (SPA nonce).
-                    client_counter = random.randint(1, 999999)
-                    r2 = self._session.get(
-                        url_auth,
-                        timeout=self.timeout,
-                        allow_redirects=True,
-                        auth=self._auth(),
-                        headers={"X-Auth-Client-Counter": str(client_counter)},
-                    )
-                    log.debug("GET /AuthChk (Digest) → HTTP %d", r2.status_code)
-                    if r2.status_code == 200:
-                        counter = r2.headers.get("X-Auth-Counter", "")
-                        if counter:
-                            try:
-                                self._auth_counter = int(counter)
-                            except ValueError:
-                                pass
-                        log.info("Authenticated (X-Auth-Counter=%s)",
-                                 self._auth_counter or "none")
-                    else:
-                        log.warning("Digest Auth failed (HTTP %d) — check EWS password",
-                                    r2.status_code)
-            else:
-                self._has_auth = False
+                    self._authenticated = self._digest_handshake(url_auth)
         except requests.RequestException as e:
             log.warning("AuthChk check failed: %s", e)
+            self._auth_unknown = True
             self._has_auth = bool(self._password)
 
-        log.info("Auth required: %s", self._has_auth)
+        log.info("Auth required: %s  authenticated: %s",
+                 self._has_auth, self._authenticated)
         return True
+
+    # ---------------------------------------------------------------- 403 reporting
+
+    def _denied_reason(self) -> str:
+        """Short reason for an HTTP 403, based on what probe() actually saw."""
+        if not self._password:
+            return "no EWS password configured"
+        if self._auth_unknown and not self._authenticated:
+            return "the printer's /AuthChk reply was unreadable, so it never signed in"
+        if not self._authenticated:
+            return "the printer rejected the configured EWS password"
+        return "the printer refused the job despite an authenticated session"
+
+    def _denied_instructions(self) -> str:
+        """Explain a 403 in terms of what the user still has to do."""
+        if not self._password:
+            return (
+                "The printer requires EWS credentials for maintenance.\n"
+                "Run: ./hpmaint.py configure\n"
+                "Enter the EWS admin password (shown on the printer's\n"
+                "touchscreen under Settings → Printer Info → EWS Password,\n"
+                "or try the printer's WiFi Direct password)."
+            )
+        if self._auth_unknown and not self._authenticated:
+            return (
+                "The printer's reply to /AuthChk could not be read, so the\n"
+                "tool never signed in. Your password is probably fine.\n"
+                "This usually means the printer is half asleep or busy.\n"
+                "Wake it (press a button or open its web page) and retry.\n"
+                "Run with --debug to see the reply it sent."
+            )
+        if not self._authenticated:
+            return (
+                "A password is configured but the printer rejected it.\n"
+                "Run: ./hpmaint.py configure and enter the current password\n"
+                "(printer touchscreen: Settings → Printer Info → EWS Password).\n"
+                "The password changes after a factory reset."
+            )
+        return (
+            "The session authenticated, so the password is correct.\n"
+            "The printer still refused the job. Another client (HP Smart, or\n"
+            "a browser tab open on the EWS) may hold the admin session.\n"
+            "Close other EWS sessions and try again."
+        )
 
     # ---------------------------------------------------------------- status / ink
 
@@ -370,10 +572,17 @@ class EWSClient:
         if cap:
             try:
                 root = ET.fromstring(cap.content)
-                supported = [e.text for e in root.iter()
-                             if e.text and e.tag.endswith("JobType")]
+                supported = _job_types(root)
                 log.debug("Supported job types: %s", supported)
-                if job_type not in supported:
+                if not supported:
+                    # Never refuse on an empty list — it means this firmware
+                    # spells the capability XML in a way we did not recognise,
+                    # not that the printer supports nothing. Let it decide.
+                    log.warning(
+                        "InternalPrintCap.xml listed no job types — "
+                        "attempting %r anyway", job_type,
+                    )
+                elif job_type.lower() not in {s.lower() for s in supported}:
                     log.warning("Job type %r not in supported list: %s",
                                 job_type, supported)
                     return MaintenanceResult(
@@ -403,17 +612,11 @@ class EWSClient:
             return MaintenanceResult(success=True, message="Command accepted by printer")
 
         if r.status_code == 403:
-            log.warning("HTTP 403 on %r — auth required or password wrong", job_type)
+            log.warning("HTTP 403 on %r — %s", job_type, self._denied_reason())
             return MaintenanceResult(
                 success=False,
-                message="Access denied (HTTP 403)",
-                manual_instructions=(
-                    "The printer requires EWS credentials for maintenance.\n"
-                    "Run: ./hpmaint.py configure\n"
-                    "Enter the EWS admin password (shown on the printer's\n"
-                    "touchscreen under Settings → Printer Info → EWS Password,\n"
-                    "or try the printer's WiFi Direct password)."
-                ),
+                message=f"Access denied (HTTP 403) — {self._denied_reason()}",
+                manual_instructions=self._denied_instructions(),
             )
 
         return MaintenanceResult(
@@ -485,8 +688,8 @@ class EWSClient:
         if r.status_code == 403:
             return MaintenanceResult(
                 success=False,
-                message="Access denied (HTTP 403) — EWS password required",
-                manual_instructions=_manual_align(),
+                message=f"Access denied (HTTP 403) — {self._denied_reason()}",
+                manual_instructions=self._denied_instructions() + "\n\n" + _manual_align(),
             )
         if r.status_code == 409:
             state_info = f" — current state: {state}" if state else ""
@@ -514,6 +717,25 @@ class EWSClient:
         if not result.success and not result.manual_instructions:
             result.manual_instructions = _manual_test_page()
         return result
+
+
+# ------------------------------------------------------------------ capability parsing
+
+def _job_types(root: ET.Element) -> list[str]:
+    """Return the job-type names listed in InternalPrintCap.xml.
+
+    Firmware spells the element several ways: JobType, InternalPrintJobType,
+    PrintJobType, jobType. Match any local name containing "jobtype" instead
+    of an exact suffix, so one naming variant does not make the capability
+    list look empty and refuse every job.
+    """
+    names: list[str] = []
+    for elem in root.iter():
+        local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        text = (elem.text or "").strip()
+        if text and "jobtype" in local.lower():
+            names.append(text)
+    return names
 
 
 # ------------------------------------------------------------------ manual fallbacks

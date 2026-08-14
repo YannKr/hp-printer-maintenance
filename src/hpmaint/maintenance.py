@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .ews import EWSClient, MaintenanceResult
 
 
@@ -128,8 +130,6 @@ def run_sequence(
     on_step_done: "Callable[[StepResult], None] | None" = None,
     on_wait: "Callable[[int], None] | None" = None,
 ) -> SequenceResult:
-    from typing import Callable
-
     result = SequenceResult(sequence=sequence)
     total = len(sequence.steps)
 
