@@ -99,6 +99,7 @@ class EWSClient:
         self._password = password
         self._has_auth: bool | None = None  # None = not yet checked
         self._auth_counter: int = 0         # X-Auth-Counter from /AuthChk
+        self._authenticated: bool = False   # Digest handshake succeeded
 
         self._digest_auth: HTTPDigestAuth | None = None
 
@@ -205,16 +206,46 @@ class EWSClient:
 
     # ---------------------------------------------------------------- probe / auth
 
+    def _digest_handshake(self, url_auth: str) -> bool:
+        """Authenticate the session with Digest + X-Auth-Client-Counter (SPA nonce)."""
+        import random
+        client_counter = random.randint(1, 999999)
+        try:
+            r2 = self._session.get(
+                url_auth,
+                timeout=self.timeout,
+                allow_redirects=True,
+                auth=self._auth(),
+                headers={"X-Auth-Client-Counter": str(client_counter)},
+            )
+        except requests.RequestException as e:
+            log.warning("Digest Auth request failed: %s", e)
+            return False
+
+        log.debug("GET /AuthChk (Digest) → HTTP %d", r2.status_code)
+        if r2.status_code == 200:
+            counter = r2.headers.get("X-Auth-Counter", "")
+            if counter:
+                try:
+                    self._auth_counter = int(counter)
+                except ValueError:
+                    pass
+            log.info("Authenticated (X-Auth-Counter=%s)", self._auth_counter or "none")
+            return True
+
+        log.warning("Digest Auth failed (HTTP %d) — check EWS password", r2.status_code)
+        return False
+
     def probe(self) -> bool:
         """Return True if the EWS is reachable. Also authenticates if needed.
 
         Auth flow mirrors the browser SPA:
           1. GET /  → establishes s- session cookie
-          2. GET /AuthChk  → check if password is set (401 = yes)
+          2. GET /AuthChk  → check if password is set. Firmware answers either
+             401, or 200 with {"hasAuth": true} — both mean a password is set.
           3. GET /AuthChk with Digest + X-Auth-Client-Counter → authenticate session
         POST requests then need X-Requested-With/Origin/Referer (nginx CSRF check).
         """
-        import random
         log.info("Probing EWS at %s", self.base_url)
 
         # 1. Establish s- session cookie by visiting root (browser does this first).
@@ -243,42 +274,60 @@ class EWSClient:
                     self._has_auth = False
             elif r.status_code == 401:
                 self._has_auth = True
+            else:
+                self._has_auth = False
+
+            # 3. A password is set — authenticate. Reached from both the 401
+            #    branch and the 200 {"hasAuth": true} branch.
+            if self._has_auth:
                 if not self._password:
                     log.warning(
                         "EWS requires a password but none is configured. "
                         "Run: ./hpmaint.py configure"
                     )
                 else:
-                    # 3. Authenticate: Digest Auth + X-Auth-Client-Counter (SPA nonce).
-                    client_counter = random.randint(1, 999999)
-                    r2 = self._session.get(
-                        url_auth,
-                        timeout=self.timeout,
-                        allow_redirects=True,
-                        auth=self._auth(),
-                        headers={"X-Auth-Client-Counter": str(client_counter)},
-                    )
-                    log.debug("GET /AuthChk (Digest) → HTTP %d", r2.status_code)
-                    if r2.status_code == 200:
-                        counter = r2.headers.get("X-Auth-Counter", "")
-                        if counter:
-                            try:
-                                self._auth_counter = int(counter)
-                            except ValueError:
-                                pass
-                        log.info("Authenticated (X-Auth-Counter=%s)",
-                                 self._auth_counter or "none")
-                    else:
-                        log.warning("Digest Auth failed (HTTP %d) — check EWS password",
-                                    r2.status_code)
-            else:
-                self._has_auth = False
+                    self._authenticated = self._digest_handshake(url_auth)
         except requests.RequestException as e:
             log.warning("AuthChk check failed: %s", e)
             self._has_auth = bool(self._password)
 
-        log.info("Auth required: %s", self._has_auth)
+        log.info("Auth required: %s  authenticated: %s",
+                 self._has_auth, self._authenticated)
         return True
+
+    # ---------------------------------------------------------------- 403 reporting
+
+    def _denied_reason(self) -> str:
+        """Short reason for an HTTP 403, based on what probe() actually saw."""
+        if not self._password:
+            return "no EWS password configured"
+        if not self._authenticated:
+            return "the printer rejected the configured EWS password"
+        return "the printer refused the job despite an authenticated session"
+
+    def _denied_instructions(self) -> str:
+        """Explain a 403 in terms of what the user still has to do."""
+        if not self._password:
+            return (
+                "The printer requires EWS credentials for maintenance.\n"
+                "Run: ./hpmaint.py configure\n"
+                "Enter the EWS admin password (shown on the printer's\n"
+                "touchscreen under Settings → Printer Info → EWS Password,\n"
+                "or try the printer's WiFi Direct password)."
+            )
+        if not self._authenticated:
+            return (
+                "A password is configured but the printer rejected it.\n"
+                "Run: ./hpmaint.py configure and enter the current password\n"
+                "(printer touchscreen: Settings → Printer Info → EWS Password).\n"
+                "The password changes after a factory reset."
+            )
+        return (
+            "The session authenticated, so the password is correct.\n"
+            "The printer still refused the job. Another client (HP Smart, or\n"
+            "a browser tab open on the EWS) may hold the admin session.\n"
+            "Close other EWS sessions and try again."
+        )
 
     # ---------------------------------------------------------------- status / ink
 
@@ -403,17 +452,11 @@ class EWSClient:
             return MaintenanceResult(success=True, message="Command accepted by printer")
 
         if r.status_code == 403:
-            log.warning("HTTP 403 on %r — auth required or password wrong", job_type)
+            log.warning("HTTP 403 on %r — %s", job_type, self._denied_reason())
             return MaintenanceResult(
                 success=False,
-                message="Access denied (HTTP 403)",
-                manual_instructions=(
-                    "The printer requires EWS credentials for maintenance.\n"
-                    "Run: ./hpmaint.py configure\n"
-                    "Enter the EWS admin password (shown on the printer's\n"
-                    "touchscreen under Settings → Printer Info → EWS Password,\n"
-                    "or try the printer's WiFi Direct password)."
-                ),
+                message=f"Access denied (HTTP 403) — {self._denied_reason()}",
+                manual_instructions=self._denied_instructions(),
             )
 
         return MaintenanceResult(
@@ -485,8 +528,8 @@ class EWSClient:
         if r.status_code == 403:
             return MaintenanceResult(
                 success=False,
-                message="Access denied (HTTP 403) — EWS password required",
-                manual_instructions=_manual_align(),
+                message=f"Access denied (HTTP 403) — {self._denied_reason()}",
+                manual_instructions=self._denied_instructions() + "\n\n" + _manual_align(),
             )
         if r.status_code == 409:
             state_info = f" — current state: {state}" if state else ""
