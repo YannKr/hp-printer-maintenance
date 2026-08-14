@@ -42,6 +42,35 @@ log = get_logger(__name__)
 
 # ────────────────────────────────────────────────────── helpers
 
+# Options whose value is a credential and must never reach the log file.
+_SECRET_OPTS = ("--password",)
+
+
+def _redact_args(argv: list[str]) -> list[str]:
+    """Return argv with credential values replaced by ***.
+
+    Handles both `--password secret` and `--password=secret`.
+    """
+    safe: list[str] = []
+    hide_next = False
+    for arg in argv:
+        if hide_next:
+            safe.append("***")
+            hide_next = False
+            continue
+        for opt in _SECRET_OPTS:
+            if arg == opt:
+                safe.append(arg)
+                hide_next = True
+                break
+            if arg.startswith(opt + "="):
+                safe.append(f"{opt}=***")
+                break
+        else:
+            safe.append(arg)
+    return safe
+
+
 def _ink_bar(pct: int | None, width: int = 12) -> str:
     """Return a simple ASCII bar for ink level."""
     if pct is None:
@@ -215,7 +244,7 @@ def main(
     # Initialise logging first so every subsequent call is captured
     lp = log_setup(debug=debug, log_file=Path(log_file) if log_file else None)
     log.info("=" * 60)
-    log.info("hpmaint started  args=%s", sys.argv[1:])
+    log.info("hpmaint started  args=%s", _redact_args(sys.argv[1:]))
 
     cfg = Config(path=None if config_path is None else Path(config_path))
     if ip:
