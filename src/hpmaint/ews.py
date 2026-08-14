@@ -17,10 +17,14 @@ Confirmed endpoints (reverse-engineered from /framework/Unified.js + manifests):
 Auth: HTTP Digest Auth (admin + EWS password). Most GETs work unauthenticated;
 POSTs to maintenance endpoints require credentials when hasAuth=true.
 
-Redirects: every call that can carry the EWS password uses
-allow_redirects=False. The endpoints above are fixed LEDM paths on a LAN
-device — a redirect is never legitimate, and following one would hand the
-Digest credentials to whatever host the redirect names.
+Redirects: requests never follow redirects automatically, because following
+one would hand the Digest credentials to whatever host the redirect names.
+Exactly one redirect is honoured, by `_https_upgrade()`: http → https on the
+same host, same port semantics, same path and query. Some firmware sends the
+whole EWS to https, and that is the only redirect a printer has a reason to
+send. Everything else is refused and reported.
+
+TLS on the upgraded connection is NOT verified — see _VERIFY_UPGRADE.
 """
 
 from __future__ import annotations
@@ -31,6 +35,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 try:
     import requests
@@ -59,6 +64,56 @@ CONFIG_PAGE = "configurationPage"
 DIAG_PAGE   = "diagnosticsPage"
 
 _TIMEOUT = 12
+
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# TLS verification on the https:// connection we upgrade to.
+#
+# This is False on purpose, and it is the only place in the tool that skips
+# verification. Every printer in scope ships a self-signed certificate for a
+# hostname that is not its IP address, so verification can never succeed and
+# `verify=True` would leave HTTPS-only firmware permanently unreachable.
+#
+# What this does and does not buy:
+#  - The baseline for this tool is plain http:// on port 80. Credentials
+#    already cross the LAN in the clear on that path. An unverified TLS
+#    connection is strictly better than the cleartext it replaces.
+#  - The target is not attacker-chosen. _https_upgrade() only accepts a
+#    redirect to the SAME host and the SAME path, changing nothing but the
+#    scheme, so a redirect can never move the request or its credentials to
+#    another host, verified or not.
+#  - It does NOT defend against an active machine-in-the-middle on the LAN.
+#    Such an attacker can already read the plaintext HTTP this replaces.
+_VERIFY_UPGRADE = False
+
+
+def _https_upgrade(url: str, location: str) -> str | None:
+    """Return the URL to retry when `location` is an HTTPS upgrade of `url`.
+
+    Returns None — meaning "refuse this redirect" — for anything else: a
+    different host, a different path or query, a downgrade back to http, or a
+    port that is not the https default.
+    """
+    if not location:
+        return None
+    src = urlsplit(url)
+    dst = urlsplit(urljoin(url, location))
+    if src.scheme != "http" or dst.scheme != "https":
+        return None
+    if dst.username is not None or dst.password is not None:
+        return None
+    if (dst.hostname or "").lower() != (src.hostname or "").lower():
+        return None
+    if (dst.path or "/") != (src.path or "/") or dst.query != src.query:
+        return None
+    if dst.port not in (None, 443):
+        return None
+    return urlunsplit(dst)
+
+
+def _origin_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 # ------------------------------------------------------------------ data types
@@ -128,12 +183,34 @@ class EWSClient:
             return self._digest_auth
         return None
 
+    def _session_get(self, url: str, **kw: Any) -> requests.Response:
+        """GET one URL, honouring only a same-host HTTPS upgrade redirect.
+
+        Any other 3xx is handed back to the caller unfollowed, so it is
+        reported as the failure it is instead of leaking credentials.
+        """
+        r = self._session.get(url, timeout=self.timeout,
+                              allow_redirects=False, **kw)
+        if r.status_code not in _REDIRECT_CODES:
+            return r
+
+        location = r.headers.get("Location", "")
+        target = _https_upgrade(url, location)
+        if target is None:
+            log.warning("Refusing redirect %s → %r: not a same-host HTTPS upgrade",
+                        url, location)
+            return r
+
+        log.info("Upgrading to HTTPS: %s → %s", url, target)
+        return self._session.get(target, timeout=self.timeout,
+                                 allow_redirects=False,
+                                 verify=_VERIFY_UPGRADE, **kw)
+
     def _get(self, path: str, **kw: Any) -> requests.Response | None:
         url = self._url(path)
         log.debug("GET %s", url)
         try:
-            r = self._session.get(url, timeout=self.timeout,
-                                  allow_redirects=False, auth=self._auth(), **kw)
+            r = self._session_get(url, auth=self._auth(), **kw)
             log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
             if r.status_code >= 300:
                 log.warning("GET %s returned HTTP %d", url, r.status_code)
@@ -148,6 +225,39 @@ class EWSClient:
         except requests.RequestException as e:
             log.warning("GET %s — %s", url, e)
             return None
+
+    def _post_https_upgrade(
+        self,
+        url: str,
+        response: requests.Response,
+        body: str,
+        headers: dict,
+    ) -> requests.Response:
+        """Repeat a POST over https when the redirect is a same-host upgrade.
+
+        Returns the original response unchanged when the redirect is refused.
+        """
+        location = response.headers.get("Location", "")
+        target = _https_upgrade(url, location)
+        if target is None:
+            log.warning("Refusing redirect %s → %r: not a same-host HTTPS upgrade",
+                        url, location)
+            return response
+
+        # nginx checks Origin/Referer as CSRF protection, so they have to name
+        # the scheme we are actually posting to.
+        origin = _origin_of(target)
+        upgraded_headers = dict(headers, Origin=origin, Referer=origin + "/")
+        log.info("Upgrading to HTTPS: %s → %s", url, target)
+        return self._session.post(
+            target,
+            data=body.encode("utf-8"),
+            headers=upgraded_headers,
+            timeout=self.timeout,
+            allow_redirects=False,
+            auth=self._auth(),
+            verify=_VERIFY_UPGRADE,
+        )
 
     def _post_xml(
         self,
@@ -185,6 +295,8 @@ class EWSClient:
                     allow_redirects=False,
                     auth=auth,
                 )
+                if r.status_code in _REDIRECT_CODES:
+                    r = self._post_https_upgrade(url, r, body, extra_headers)
                 log.debug("  → HTTP %d  (%d bytes)", r.status_code, len(r.content))
                 last_response = r
 
@@ -235,10 +347,8 @@ class EWSClient:
         import random
         client_counter = random.randint(1, 999999)
         try:
-            r2 = self._session.get(
+            r2 = self._session_get(
                 url_auth,
-                timeout=self.timeout,
-                allow_redirects=False,
                 auth=self._auth(),
                 headers={"X-Auth-Client-Counter": str(client_counter)},
             )
@@ -291,7 +401,7 @@ class EWSClient:
         # 2. Check auth requirement.
         url_auth = self._url("/AuthChk")
         try:
-            r = self._session.get(url_auth, timeout=self.timeout, allow_redirects=False)
+            r = self._session_get(url_auth)
             log.debug("GET /AuthChk → HTTP %d", r.status_code)
             if r.status_code == 200:
                 try:

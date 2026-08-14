@@ -156,8 +156,22 @@ def test_authenticated_calls_do_not_follow_redirects(client_factory):
 
 
 def test_redirect_is_not_treated_as_a_successful_get(client_factory):
+    """The body is valid XML, so only the status check can reject it."""
+    from conftest import CONSUMABLES_XML
+
     client, _ = client_factory(
-        routes={"/DevMgmt/ConsumableConfigDyn.xml":
-                FakeResponse(302, "", {"Location": "http://evil.example/"})},
+        routes={"/DevMgmt/ConsumableConfigDyn.xml": FakeResponse(
+            302, CONSUMABLES_XML, {"Location": "http://evil.example/"})},
     )
     assert client.get_ink_levels() == []
+
+
+def test_a_200_with_that_same_body_does_parse(client_factory):
+    """Proves the previous test fails on the status code, not on parsing."""
+    from conftest import CONSUMABLES_XML
+
+    client, _ = client_factory(
+        routes={"/DevMgmt/ConsumableConfigDyn.xml":
+                FakeResponse(200, CONSUMABLES_XML)},
+    )
+    assert len(client.get_ink_levels()) == 2
