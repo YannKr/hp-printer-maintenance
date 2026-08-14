@@ -7,6 +7,7 @@ FakeSession, and the port scanner and mDNS browser are never started.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 
 import pytest
@@ -85,6 +86,16 @@ def isolate_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("HPMAINT_CONFIG", str(tmp_path / "config.toml"))
     for var in ("HPMAINT_PRINTER_IP", "HPMAINT_PRINTER_PASSWORD", "HPMAINT_DEBUG"):
         monkeypatch.delenv(var, raising=False)
+
+    # log.setup() adds a handler per call. Without this, handlers from earlier
+    # tests stay attached and a later test's records land in their files too.
+    root = logging.getLogger("hpmaint")
+    saved = root.handlers[:]
+    root.handlers.clear()
+    yield
+    for handler in root.handlers:
+        handler.close()
+    root.handlers[:] = saved
 
 
 @pytest.fixture
