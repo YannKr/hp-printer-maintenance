@@ -101,6 +101,42 @@ def test_config_file_is_written_0600(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_new_config_directory_is_0700(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, monkeypatch)
+    cfg.save()
+    assert stat.S_IMODE(os.stat(cfg._path.parent).st_mode) == 0o700
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_existing_world_readable_directory_is_tightened(tmp_path, monkeypatch):
+    """mkdir(mode=...) does nothing to a directory that already exists."""
+    cfg = _cfg(tmp_path, monkeypatch)
+    cfg._path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(cfg._path.parent, 0o755)
+    assert stat.S_IMODE(os.stat(cfg._path.parent).st_mode) == 0o755
+
+    cfg.password = "secret"
+    cfg.save()
+    assert stat.S_IMODE(os.stat(cfg._path.parent).st_mode) == 0o700
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_an_unrelated_existing_directory_is_left_alone(tmp_path, monkeypatch):
+    """--config can name any path. Never chmod a directory that is not ours."""
+    home = tmp_path / "pretend-home"
+    home.mkdir(mode=0o755)
+    os.chmod(home, 0o755)
+
+    monkeypatch.delenv("HPMAINT_PRINTER_PASSWORD", raising=False)
+    cfg = Config(path=home / "hpmaint.toml")
+    cfg.password = "secret"
+    cfg.save()
+
+    assert stat.S_IMODE(os.stat(home).st_mode) == 0o755      # untouched
+    assert stat.S_IMODE(os.stat(cfg._path).st_mode) == 0o600  # file still safe
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 def test_existing_world_readable_file_is_tightened(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, monkeypatch)
     cfg.save()

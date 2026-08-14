@@ -68,7 +68,15 @@ class Config:
             self._data["printer"]["password"] = pw
 
     def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent = self._path.parent
+        created = not parent.exists()
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir's mode applies only at creation, so an existing 0755 directory
+        # was never tightened. Do it explicitly — but only for a directory we
+        # made or that is plainly ours: --config can name any path, and
+        # chmodding somebody's $HOME to 0700 would be a nasty surprise.
+        if created or parent.name == "hpmaint":
+            os.chmod(parent, 0o700)
         # The file holds the EWS password. Create it 0600 before any content
         # is written, and re-apply the mode in case the file already existed.
         self._path.touch(mode=0o600, exist_ok=True)
