@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,36 @@ from typing import Callable
 from .log import get_logger
 
 log = get_logger(__name__)
+
+# Strings that really identify an HP device. "hp" is matched as a whole word
+# only: as a bare substring it also matches "php", so every PHP admin page on
+# the LAN used to pass as a printer. "embedded web server" is deliberately not
+# here — Canon, Ricoh and Xerox use that phrase too.
+_HP_MARKERS = re.compile(
+    r"\bhp\b"
+    r"|hewlett[- ]?packard"
+    r"|\benvy\b|officejet|deskjet|laserjet|photosmart"
+    r"|/DevMgmt/|\bLEDM\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_hp(*parts: str) -> bool:
+    """True if any of the given strings carries an HP identifier."""
+    return bool(_HP_MARKERS.search(" ".join(p for p in parts if p)))
+
+
+def _prop_strings(props: dict) -> list[str]:
+    """Flatten an mDNS TXT record to plain strings (keys and values)."""
+    out: list[str] = []
+    for key, value in props.items():
+        for item in (key, value):
+            if isinstance(item, bytes):
+                item = item.decode(errors="ignore")
+            if item is not None:
+                out.append(str(item))
+    return out
+
 
 # ------------------------------------------------------------------ data
 
@@ -51,6 +82,15 @@ def discover_mdns(timeout: float = 5.0) -> list[PrinterInfo]:
             info = zc.get_service_info(stype, name)
             if not info:
                 return
+
+            props = info.properties or {}
+            # _http._tcp advertises everything with a web UI — Chromecasts,
+            # NASes, routers. Require an HP identifier before treating an
+            # advert as a printer. The tool only speaks HP's LEDM API.
+            if not _looks_hp(info.name, name, *_prop_strings(props)):
+                log.debug("mDNS ignored (no HP identifier): %s via %s", name, stype)
+                return
+
             for addr in info.parsed_addresses():
                 try:
                     ipaddress.ip_address(addr)
@@ -64,7 +104,6 @@ def discover_mdns(timeout: float = 5.0) -> list[PrinterInfo]:
                     ews_port=80,
                     ipp_port=info.port if info.port else 631,
                 )
-                props = info.properties or {}
                 for key in (b"ty", b"product", b"model"):
                     if key in props:
                         raw = props[key]
@@ -141,17 +180,20 @@ def _port_open(host: str, port: int, timeout: float = 0.4) -> bool:
 
 
 def _is_hp_ews(ip: str, port: int = 80, timeout: float = 3.0) -> bool:
-    """Quick heuristic: does this host look like an HP EWS?"""
+    """Quick heuristic: does this host look like an HP EWS?
+
+    The Server header is the strongest signal — HP's EWS reports
+    "HP HTTP Server". The body is checked with the same word-boundary
+    markers, so a PHP page no longer counts as a match.
+    """
     try:
         import requests
 
         r = requests.get(f"http://{ip}:{port}/", timeout=timeout, allow_redirects=True)
-        text = r.text.lower()
-        matched = any(
-            kw in text
-            for kw in ("hp", "hewlett", "envy", "officejet", "laserjet", "embedded web")
-        )
-        log.debug("HP EWS check %s → %s", ip, "yes" if matched else "no")
+        server = r.headers.get("Server", "")
+        matched = _looks_hp(server, r.text)
+        log.debug("HP EWS check %s → %s  (Server: %r)",
+                  ip, "yes" if matched else "no", server)
         return matched
     except Exception as exc:
         log.debug("HP EWS check %s → error: %s", ip, exc)
