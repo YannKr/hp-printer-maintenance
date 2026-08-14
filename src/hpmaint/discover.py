@@ -14,17 +14,33 @@ from .log import get_logger
 
 log = get_logger(__name__)
 
-# Strings that really identify an HP device. "hp" is matched as a whole word
-# only: as a bare substring it also matches "php", so every PHP admin page on
-# the LAN used to pass as a printer. "embedded web server" is deliberately not
-# here — Canon, Ricoh and Xerox use that phrase too.
+# Strings that really identify an HP device.
+#
+# The original bug was that "hp" is a substring of "php", so every PHP admin
+# page passed. The fix is a look-behind, not a full word boundary: "hp" must
+# not be preceded by a letter or digit, but it may be followed by anything.
+# A trailing boundary would lose real hostnames — HP names its devices
+# HPF3D024 and HP0123AB, and there is no word boundary between "P" and "F".
+#
+# "embedded web server" is deliberately absent: Canon, Ricoh and Xerox use
+# that phrase too.
 _HP_MARKERS = re.compile(
-    r"\bhp\b"
+    r"(?<![a-z0-9])hp"                       # HP, HPF3D024, hp-setup
     r"|hewlett[- ]?packard"
-    r"|\benvy\b|officejet|deskjet|laserjet|photosmart"
+    r"|(?<![a-z0-9])npi[0-9a-f]{6}"          # JetDirect / LaserJet mDNS names
+    r"|\benvy\b|officejet|deskjet|laserjet|photosmart|jetdirect"
     r"|/DevMgmt/|\bLEDM\b",
     re.IGNORECASE,
 )
+
+# TXT-record fields that name the manufacturer outright. This is the reliable
+# path for _ipp._tcp and _printer._tcp adverts.
+_MFG_FIELDS = ("usb_mfg", "mfg", "mfr")
+_MODEL_FIELDS = ("ty", "product", "usb_mdl", "mdl", "model")
+_HP_MFG_VALUES = {"hp", "hewlett-packard", "hewlett packard", "hewlettpackard"}
+
+# Definitive check for a printer whose landing page carries no HP string.
+_LEDM_PROBE = "/DevMgmt/ProductStatusDyn.xml"
 
 
 def _looks_hp(*parts: str) -> bool:
@@ -42,6 +58,40 @@ def _prop_strings(props: dict) -> list[str]:
             if item is not None:
                 out.append(str(item))
     return out
+
+
+def _prop_map(props: dict) -> dict[str, str]:
+    """Decode an mDNS TXT record into a lower-cased key → value map."""
+    out: dict[str, str] = {}
+    for key, value in props.items():
+        k = key.decode(errors="ignore") if isinstance(key, bytes) else str(key)
+        if isinstance(value, bytes):
+            v = value.decode(errors="ignore")
+        else:
+            v = "" if value is None else str(value)
+        out[k.lower()] = v
+    return out
+
+
+def _mdns_is_hp(name: str, props: dict) -> bool:
+    """Decide from an mDNS advert whether this is an HP printer.
+
+    The IPP TXT record is the reliable signal and is checked first:
+    `usb_MFG` names the manufacturer, `ty` and `product` name the model.
+    The service instance name is the fallback for adverts without a TXT
+    record, such as bare `_http._tcp` entries.
+    """
+    fields = _prop_map(props)
+
+    for field_name in _MFG_FIELDS:
+        if fields.get(field_name, "").strip().lower() in _HP_MFG_VALUES:
+            return True
+
+    for field_name in _MODEL_FIELDS:
+        if _looks_hp(fields.get(field_name, "")):
+            return True
+
+    return _looks_hp(name)
 
 
 # ------------------------------------------------------------------ data
@@ -87,7 +137,7 @@ def discover_mdns(timeout: float = 5.0) -> list[PrinterInfo]:
             # _http._tcp advertises everything with a web UI — Chromecasts,
             # NASes, routers. Require an HP identifier before treating an
             # advert as a printer. The tool only speaks HP's LEDM API.
-            if not _looks_hp(info.name, name, *_prop_strings(props)):
+            if not (_mdns_is_hp(info.name, props) or _mdns_is_hp(name, props)):
                 log.debug("mDNS ignored (no HP identifier): %s via %s", name, stype)
                 return
 
@@ -192,9 +242,19 @@ def _is_hp_ews(ip: str, port: int = 80, timeout: float = 3.0) -> bool:
 
         r = requests.get(f"http://{ip}:{port}/", timeout=timeout, allow_redirects=True)
         server = r.headers.get("Server", "")
-        matched = _looks_hp(server, r.text)
-        log.debug("HP EWS check %s → %s  (Server: %r)",
-                  ip, "yes" if matched else "no", server)
+        if _looks_hp(server, r.text):
+            log.debug("HP EWS check %s → yes  (Server: %r)", ip, server)
+            return True
+
+        # The 7800-series EWS is an nginx-hosted SPA: the shell it serves can
+        # carry no HP string at all. /DevMgmt/ is HP's LEDM namespace and
+        # nothing else on a LAN answers it, so ask for it directly.
+        probe = requests.get(
+            f"http://{ip}:{port}{_LEDM_PROBE}", timeout=timeout, allow_redirects=True
+        )
+        matched = probe.status_code < 300 and "ProductStatus" in probe.text
+        log.debug("HP EWS check %s → %s  (Server: %r, LEDM probe: HTTP %d)",
+                  ip, "yes" if matched else "no", server, probe.status_code)
         return matched
     except Exception as exc:
         log.debug("HP EWS check %s → error: %s", ip, exc)
