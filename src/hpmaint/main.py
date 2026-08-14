@@ -27,6 +27,7 @@ from .ews import EWSClient, InkLevel, MaintenanceResult
 from .log import get_logger, log_path, setup as log_setup
 from .maintenance import (
     INDIVIDUAL_OPS,
+    MIN_STEP_GAP,
     SEQUENCES,
     Sequence,
     SequenceResult,
@@ -182,6 +183,26 @@ def _discover_or_exit(cfg: Config) -> tuple[PrinterInfo, EWSClient]:
     return info, client
 
 
+def _wait_between_runs(secs: int) -> None:
+    """Pause between repeats.
+
+    MIN_STEP_GAP protects the printer inside one sequence, but a repeat used
+    to fire the next POST immediately after the previous one finished, which
+    is exactly what makes nginx answer 503 and costs 60s of backoff.
+    """
+    with Progress(
+        SpinnerColumn(style="grey50"),
+        TextColumn(f"[moo.dim]Waiting {secs}s before the next run…[/]"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=console,
+    ) as prog:
+        task = prog.add_task("wait", total=secs)
+        for _ in range(secs):
+            time.sleep(1)
+            prog.advance(task, 1)
+
+
 def _run_sequence_interactive(
     client: EWSClient, seq: Sequence, repeat: int = 1
 ) -> None:
@@ -216,6 +237,10 @@ def _run_sequence_interactive(
             on_step_done=on_done,
             on_wait=on_wait,
         )
+
+        if run_num < repeat:
+            last_wait = seq.steps[-1].wait_after if seq.steps else 0
+            _wait_between_runs(max(last_wait, MIN_STEP_GAP))
 
 
 # ────────────────────────────────────────────────────── CLI
@@ -357,6 +382,8 @@ def _interactive_menu(cfg: Config, show_log_path: bool = False) -> None:
                 if op["key"] == "ink":
                     levels = client.get_ink_levels()
                     _show_ink_table(levels)
+                elif r < repeat - 1:
+                    _wait_between_runs(MIN_STEP_GAP)
 
         elif idx == n_configure:
             _configure_menu(cfg)
@@ -440,6 +467,8 @@ def op(ctx: click.Context, operation: str, repeat: int, list_ops: bool) -> None:
         _show_result(result)
         if operation == "ink":
             _show_ink_table(client.get_ink_levels())
+        elif i < repeat - 1:
+            _wait_between_runs(MIN_STEP_GAP)
 
 
 @main.command()
