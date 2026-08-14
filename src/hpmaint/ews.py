@@ -157,6 +157,7 @@ class EWSClient:
         retries_on_503: int = 0,
         retry_delay: float = 60.0,
     ) -> requests.Response | None:
+        # retries_on_503 also covers connection errors and timeouts.
         url = self._url(path)
         auth = self._auth()
         extra_headers: dict = {
@@ -204,6 +205,24 @@ class EWSClient:
                     log.warning("POST %s returned HTTP %d\n  body: %s",
                                 url, r.status_code, r.text[:400])
                 return r
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # More likely than a 503: the printer stops answering while it
+                # spools a purge. Retry on the same schedule as a 503.
+                if attempt < attempts:
+                    log.info(
+                        "POST %s failed (%s) — retrying in %ds (%d/%d)",
+                        path, type(e).__name__, int(retry_delay),
+                        attempt, retries_on_503,
+                    )
+                    sys.stderr.write(
+                        f"  Printer did not answer, retrying in {int(retry_delay)}s "
+                        f"({attempt}/{retries_on_503})\n"
+                    )
+                    sys.stderr.flush()
+                    time.sleep(retry_delay)
+                    continue
+                log.warning("POST %s — %s (no attempts left)", url, e)
+                return None
             except requests.RequestException as e:
                 log.warning("POST %s — %s", url, e)
                 return None
