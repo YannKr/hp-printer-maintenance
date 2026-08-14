@@ -445,10 +445,17 @@ class EWSClient:
         if cap:
             try:
                 root = ET.fromstring(cap.content)
-                supported = [e.text for e in root.iter()
-                             if e.text and e.tag.endswith("JobType")]
+                supported = _job_types(root)
                 log.debug("Supported job types: %s", supported)
-                if job_type not in supported:
+                if not supported:
+                    # Never refuse on an empty list — it means this firmware
+                    # spells the capability XML in a way we did not recognise,
+                    # not that the printer supports nothing. Let it decide.
+                    log.warning(
+                        "InternalPrintCap.xml listed no job types — "
+                        "attempting %r anyway", job_type,
+                    )
+                elif job_type.lower() not in {s.lower() for s in supported}:
                     log.warning("Job type %r not in supported list: %s",
                                 job_type, supported)
                     return MaintenanceResult(
@@ -583,6 +590,25 @@ class EWSClient:
         if not result.success and not result.manual_instructions:
             result.manual_instructions = _manual_test_page()
         return result
+
+
+# ------------------------------------------------------------------ capability parsing
+
+def _job_types(root: ET.Element) -> list[str]:
+    """Return the job-type names listed in InternalPrintCap.xml.
+
+    Firmware spells the element several ways: JobType, InternalPrintJobType,
+    PrintJobType, jobType. Match any local name containing "jobtype" instead
+    of an exact suffix, so one naming variant does not make the capability
+    list look empty and refuse every job.
+    """
+    names: list[str] = []
+    for elem in root.iter():
+        local = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        text = (elem.text or "").strip()
+        if text and "jobtype" in local.lower():
+            names.append(text)
+    return names
 
 
 # ------------------------------------------------------------------ manual fallbacks

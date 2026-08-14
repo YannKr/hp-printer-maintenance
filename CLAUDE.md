@@ -69,4 +69,4 @@ Python < 3.11 requires `tomli`/`tomli_w` (installed by `setup.sh`); 3.11+ uses s
 - Rich theme tokens (`moo.ok`, `moo.warn`, `moo.accent`, etc.) are defined in `theme.py`.
 - HTTP 403 from the printer has three causes: no password configured, a wrong password, or a refusal despite a valid session. `EWSClient._denied_reason()` picks the right one from what `probe()` observed, so the tool never tells a user to run `hpmaint configure` when they already have.
 - `/AuthChk` reports "password is set" in two ways depending on firmware: HTTP 401, or HTTP 200 with `{"hasAuth": true}`. Both must trigger the Digest handshake.
-- `InternalPrintCap.xml` is fetched before each job to validate that the requested job type is supported, making the tool adaptive across firmware versions.
+- `InternalPrintCap.xml` is fetched before each job to validate that the requested job type is supported. The parser matches any element whose local name contains `jobtype`, and permits the attempt when the list comes back empty. An unrecognised naming variant must not refuse every job.
