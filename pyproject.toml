@@ -14,6 +14,8 @@ dependencies = [
     "requests>=2.34.2",
     # Pulled in by requests. 2.6.3 forwards auth headers across proxied
     # redirects and bypasses decompression-bomb limits (both fixed 2.7.0).
+    # 2.7.0 buffers an unbounded chunk-size line, can loop forever on chunked
+    # deflate and can ignore HTTPS proxy TLS settings (all fixed 2.8.0).
     "urllib3>=2.8.0",
     # 0.148.0 carries 5 LAN-local mDNS DoS advisories; the last is fixed
     # in 0.149.16. mDNS is this tool's default discovery path.
