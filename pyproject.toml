@@ -11,25 +11,27 @@ requires-python = ">=3.10"
 dependencies = [
     # 2.32.0 leaks .netrc credentials on malicious URLs (fixed 2.32.4) and
     # reuses insecure temp files (fixed 2.33.0).
-    "requests>=2.33.0",
+    "requests>=2.34.2",
     # Pulled in by requests. 2.6.3 forwards auth headers across proxied
     # redirects and bypasses decompression-bomb limits (both fixed 2.7.0).
-    "urllib3>=2.7.0",
+    # 2.7.0 buffers an unbounded chunk-size line, can loop forever on chunked
+    # deflate and can ignore HTTPS proxy TLS settings (all fixed 2.8.0).
+    "urllib3>=2.8.0",
     # 0.148.0 carries 5 LAN-local mDNS DoS advisories; the last is fixed
     # in 0.149.16. mDNS is this tool's default discovery path.
-    "zeroconf>=0.149.16",
-    "rich>=14.0.0",
-    "click>=8.1.0",
+    "zeroconf>=0.151.5",
+    "rich>=15.0.0",
+    "click>=8.5.0",
     # Writes config.toml. Without it `configure` falls back to a hand-rolled
     # writer, which was the default on 3.11+ because setup.sh only installed
     # tomli_w on older Python.
-    "tomli_w>=1.0.0",
+    "tomli_w>=1.2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "ruff>=0.6.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
 ]
 
 [project.scripts]
