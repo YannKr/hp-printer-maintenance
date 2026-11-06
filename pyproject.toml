@@ -19,9 +19,9 @@ dependencies = [
     "urllib3>=2.8.0",
     # 0.148.0 carries 5 LAN-local mDNS DoS advisories; the last is fixed
     # in 0.149.16. mDNS is this tool's default discovery path.
-    "zeroconf>=0.151.5",
+    "zeroconf>=0.153.0",
     "rich>=15.0.0",
-    "click>=8.5.0",
+    "click>=8.5.1",
     # Writes config.toml. Without it `configure` falls back to a hand-rolled
     # writer, which was the default on 3.11+ because setup.sh only installed
     # tomli_w on older Python.
@@ -30,8 +30,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.1.1",
-    "ruff>=0.17.2",
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
 ]
 
 [project.scripts]
