@@ -19,7 +19,8 @@ dependencies = [
     "urllib3>=2.8.0",
     # 0.148.0 carries 5 LAN-local mDNS DoS advisories; the last is fixed
     # in 0.149.16. mDNS is this tool's default discovery path.
-    "zeroconf>=0.153.0",
+    # 0.153.0 needs Python 3.11+, so 0.152.1 is the newest floor for 3.10.
+    "zeroconf>=0.152.1",
     "rich>=15.0.0",
     "click>=8.5.1",
     # Writes config.toml. Without it `configure` falls back to a hand-rolled
