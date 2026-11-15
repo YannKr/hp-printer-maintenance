@@ -61,7 +61,7 @@ Config file: `~/.config/hpmaint/config.toml`. Env vars override file values:
 | `HPMAINT_DEBUG` | Enable debug logging |
 | `HPMAINT_LOG_FILE` | Override log file path |
 
-`tomli_w` is a declared dependency and writes the config on every version. Python < 3.11 also needs `tomli` to read it (installed by `setup.sh`); 3.11+ uses stdlib `tomllib`.
+`tomli_w` is a declared dependency and writes the config. The stdlib `tomllib` reads it.
 
 ## Key design notes
 

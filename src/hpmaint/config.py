@@ -3,21 +3,9 @@
 from __future__ import annotations
 
 import os
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
-
-# Use stdlib tomllib on 3.11+; fall back to tomli on 3.10
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib  # type: ignore[no-redef]
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef,import-not-found]
-        except ImportError:
-            tomllib = None  # type: ignore[assignment]
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "hpmaint" / "config.toml"
 
@@ -47,7 +35,7 @@ class Config:
 
     def _load(self) -> None:
         self._data = _deep_merge({}, _DEFAULTS)
-        if self._path.exists() and tomllib is not None:
+        if self._path.exists():
             raw = self._path.read_bytes()
             try:
                 parsed = tomllib.loads(raw.decode())

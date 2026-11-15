@@ -10,10 +10,7 @@ import pytest
 
 from hpmaint.config import Config, _toml_value
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
+import tomllib
 
 AWKWARD = 'my"pass\\word'
 
