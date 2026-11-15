@@ -7,7 +7,7 @@ name = "hp-printer-maintenance"
 version = "1.0.0"
 description = "CLI tool for HP inkjet printer maintenance via the Embedded Web Server"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     # 2.32.0 leaks .netrc credentials on malicious URLs (fixed 2.32.4) and
     # reuses insecure temp files (fixed 2.33.0).
@@ -19,8 +19,7 @@ dependencies = [
     "urllib3>=2.8.0",
     # 0.148.0 carries 5 LAN-local mDNS DoS advisories; the last is fixed
     # in 0.149.16. mDNS is this tool's default discovery path.
-    # 0.153.0 needs Python 3.11+, so 0.152.1 is the newest floor for 3.10.
-    "zeroconf>=0.152.1",
+    "zeroconf>=0.154.0",
     "rich>=15.0.0",
     "click>=8.5.1",
     # Writes config.toml. Without it `configure` falls back to a hand-rolled
@@ -46,7 +45,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "tests"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Pyflakes plus the pycodestyle errors that are real errors. Style rules are

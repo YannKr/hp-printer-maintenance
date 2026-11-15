@@ -9,9 +9,9 @@ cd "$SCRIPT_DIR"
 
 # ── Python detection ────────────────────────────────────────────────────────
 PYTHON=""
-for cmd in python3.13 python3.12 python3.11 python3.10 python3 python; do
+for cmd in python3.13 python3.12 python3.11 python3 python; do
     if command -v "$cmd" >/dev/null 2>&1; then
-        ver=$("$cmd" -c "import sys; print(sys.version_info >= (3,10))" 2>/dev/null)
+        ver=$("$cmd" -c "import sys; print(sys.version_info >= (3,11))" 2>/dev/null)
         if [ "$ver" = "True" ]; then
             PYTHON="$cmd"
             break
@@ -20,7 +20,7 @@ for cmd in python3.13 python3.12 python3.11 python3.10 python3 python; do
 done
 
 if [ -z "$PYTHON" ]; then
-    echo "ERROR: Python 3.10+ is required but not found." >&2
+    echo "ERROR: Python 3.11+ is required but not found." >&2
     exit 1
 fi
 
@@ -47,11 +47,6 @@ fi
 echo "Installing dependencies…"
 pip install --quiet --upgrade pip
 pip install --quiet -e .
-
-# tomli_w saves the config on every version and is a declared dependency.
-# tomli is the reader on Python < 3.11 only (3.11+ has stdlib tomllib).
-python -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" \
-    || pip install --quiet tomli
 
 # ── Make launcher executable ────────────────────────────────────────────────
 chmod +x hpmaint.py

@@ -86,7 +86,7 @@ prints clear manual touchscreen instructions as a fallback.
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+
 - Printer connected to the same LAN (Wi-Fi or Ethernet)
 - EWS accessible on port 80 (default; no firewall blocking it)
 
